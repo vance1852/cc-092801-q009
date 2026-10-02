@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS road_corridors (
     hourly_capacity TEXT NOT NULL,
     delay_basis_points INTEGER NOT NULL,
     response_minutes INTEGER NOT NULL,
+    response_duration_unit TEXT,
     revision INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','suspended','retired')),
     created_at TEXT NOT NULL,
@@ -209,6 +210,18 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    _migrate(connection)
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """为历史数据库补充响应时长单位列。
+
+    旧库中的 road_corridors 行没有单位标记（NULL），表示单位无法明确识别，
+    读取时会被标记为未确认，并阻止自动安排，直到人工确认单位为分钟。
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(road_corridors)")}
+    if "response_duration_unit" not in columns:
+        connection.execute("ALTER TABLE road_corridors ADD COLUMN response_duration_unit TEXT")
 
 
 @contextmanager

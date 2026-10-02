@@ -17,6 +17,34 @@ RISK_INDEXES = {"HUMIDITY", "INJURY", "CONGESTION", "HAZMAT", "SECONDARY", "CUST
 RESOURCE_KINDS = {"preservation-box", "tow-truck", "ambulance", "warning-kit", "evidence-kit", "rapid-response-team"}
 CENTER_KINDS = {"road-section", "receiving-vault", "herbarium-room", "storage", "patrol-station"}
 
+# 响应时长唯一受支持的单位是分钟；所有建档、执行、展示和审计路径共用这一语义。
+RESPONSE_DURATION_UNIT = "minutes"
+# 响应时长上限：7 天。超出即视为单位登记错误（例如把小时或秒当成分钟），写入前拒绝。
+MAX_RESPONSE_MINUTES = 7 * 24 * 60
+
+
+def validate_response_minutes(value: object, field: str = "response_minutes") -> int:
+    """统一的响应时长边界校验：拒绝非整数、负值、零值和异常超长时长。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationFailed(f"{field} 必须是整数分钟数")
+    if value <= 0:
+        raise ValidationFailed(f"{field} 必须大于 0 分钟")
+    if value > MAX_RESPONSE_MINUTES:
+        raise ValidationFailed(
+            f"{field} 不能超过 {MAX_RESPONSE_MINUTES} 分钟（7 天），请确认是否误用了其他单位"
+        )
+    return value
+
+
+def validate_response_unit(value: object) -> str:
+    """响应时长单位必须显式为分钟；无法识别的单位一律拒绝，不做静默猜测。"""
+    if value is None:
+        return RESPONSE_DURATION_UNIT
+    unit = required_text(value, "response_duration_unit", 32)
+    if unit != RESPONSE_DURATION_UNIT:
+        raise ValidationFailed("response_duration_unit 仅支持 minutes，其他单位请先换算为分钟再登记")
+    return unit
+
 
 def required_text(value: object, field: str, maximum: int = 256) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -54,12 +82,6 @@ def decimal_value(
     if maximum is not None and result > maximum:
         raise ValidationFailed(f"{field} 不能大于 {maximum}")
     return result
-
-
-def positive_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValidationFailed(f"{field} 必须是正整数")
-    return value
 
 
 def date_text(value: object, field: str) -> str:
@@ -133,6 +155,7 @@ class RoadCorridor:
     hourly_capacity: Decimal
     delay_basis_points: int
     response_minutes: int
+    response_duration_unit: str
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "RoadCorridor":
@@ -155,7 +178,8 @@ class RoadCorridor:
                 raw.get("hourly_capacity"), "hourly_capacity", minimum=Decimal("0.001")
             ),
             delay_basis_points=loss,
-            response_minutes=positive_integer(raw.get("response_minutes"), "response_minutes"),
+            response_minutes=validate_response_minutes(raw.get("response_minutes")),
+            response_duration_unit=validate_response_unit(raw.get("response_duration_unit")),
         )
 
 
