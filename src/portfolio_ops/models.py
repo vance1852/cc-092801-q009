@@ -17,6 +17,11 @@ RISK_INDEXES = {"HUMIDITY", "INJURY", "CONGESTION", "HAZMAT", "SECONDARY", "CUST
 RESOURCE_KINDS = {"preservation-box", "tow-truck", "ambulance", "warning-kit", "evidence-kit", "rapid-response-team"}
 CENTER_KINDS = {"road-section", "receiving-vault", "herbarium-room", "storage", "patrol-station"}
 
+# 响应时长统一以分钟登记；超过 24 小时视为异常超长，写入前拒绝。
+MAX_RESPONSE_MINUTES = 24 * 60
+DURATION_STATE_MINUTES = "minutes"
+DURATION_STATE_AMBIGUOUS = "ambiguous"
+
 
 def required_text(value: object, field: str, maximum: int = 256) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -56,10 +61,28 @@ def decimal_value(
     return result
 
 
-def positive_integer(value: object, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValidationFailed(f"{field} 必须是正整数")
+def response_minutes_value(value: object, field: str = "response_minutes") -> int:
+    """校验以分钟登记的响应时长，负值、零值和异常超长时长在写入前拒绝。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationFailed(f"{field} 必须是以分钟为单位的整数")
+    if value <= 0:
+        raise ValidationFailed(f"{field} 必须大于 0 分钟")
+    if value > MAX_RESPONSE_MINUTES:
+        raise ValidationFailed(f"{field} 不能超过 {MAX_RESPONSE_MINUTES} 分钟（24 小时）")
     return value
+
+
+def stored_response_minutes(raw: object) -> tuple[int | None, str]:
+    """读取历史记录中的响应时长，返回 (分钟数, 状态)。
+
+    状态为 minutes 表示可按分钟安全参与计算；ambiguous 表示旧记录无法明确
+    识别单位，必须标记并阻止自动安排，而不是静默猜测。
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, DURATION_STATE_AMBIGUOUS
+    if raw <= 0 or raw > MAX_RESPONSE_MINUTES:
+        return None, DURATION_STATE_AMBIGUOUS
+    return raw, DURATION_STATE_MINUTES
 
 
 def date_text(value: object, field: str) -> str:
@@ -155,7 +178,7 @@ class RoadCorridor:
                 raw.get("hourly_capacity"), "hourly_capacity", minimum=Decimal("0.001")
             ),
             delay_basis_points=loss,
-            response_minutes=positive_integer(raw.get("response_minutes"), "response_minutes"),
+            response_minutes=response_minutes_value(raw.get("response_minutes")),
         )
 
 

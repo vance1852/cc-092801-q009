@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS road_corridors (
     preservation_resource_kind TEXT NOT NULL,
     hourly_capacity TEXT NOT NULL,
     delay_basis_points INTEGER NOT NULL,
-    response_minutes INTEGER NOT NULL,
+    response_minutes INTEGER NOT NULL CHECK(response_minutes BETWEEN 1 AND 1440),
     revision INTEGER NOT NULL DEFAULT 1,
     state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active','suspended','retired')),
     created_at TEXT NOT NULL,
@@ -209,6 +209,24 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 def initialize(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA)
+    _migrate_legacy_durations(connection)
+
+
+def _migrate_legacy_durations(connection: sqlite3.Connection) -> None:
+    """迁移旧版转运路线表的响应时长列，统一为分钟语义。
+
+    旧记录若带有单位可明确识别的 response_hours 列，则换算为分钟回填；
+    无法明确识别单位的记录保持 NULL，由读取层标记并阻止自动安排，
+    而不是静默猜测。
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(road_corridors)")}
+    if not columns or "response_minutes" in columns:
+        return
+    connection.execute("ALTER TABLE road_corridors ADD COLUMN response_minutes INTEGER")
+    if "response_hours" in columns:
+        connection.execute(
+            "UPDATE road_corridors SET response_minutes=response_hours*60 WHERE response_minutes IS NULL"
+        )
 
 
 @contextmanager

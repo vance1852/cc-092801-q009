@@ -5,13 +5,21 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import timedelta
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
 from .clock import SystemClock, parse_utc, utc_text
 from .errors import Conflict, Forbidden, InvalidState, NotFound, ValidationFailed
-from .models import RiskIndexRecord, ResponseCenter, PreservationResourceLot, DispatchRequest, RoadCorridor, ResponseScenario
+from .models import (
+    DURATION_STATE_MINUTES,
+    RiskIndexRecord,
+    ResponseCenter,
+    PreservationResourceLot,
+    DispatchRequest,
+    RoadCorridor,
+    ResponseScenario,
+    stored_response_minutes,
+)
 from .planning import (
     AllocationRequest,
     RiskPoint,
@@ -21,6 +29,7 @@ from .planning import (
     delivered_after_loss,
     digest,
     effective_capacity,
+    expected_arrival,
     latest_streak,
     moving_average,
     quantize_volume,
@@ -36,6 +45,19 @@ ROLE_PERMISSIONS = {
     "risk": {"outage.write", "scenario.approve", "report.read"},
     "auditor": {"report.read", "audit.read"},
 }
+
+
+def _route_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """通道建档、API 展示和历史读取共用的统一视图。
+
+    响应时长以分钟为唯一语义；旧记录无法明确识别单位时标记为 ambiguous，
+    由执行层阻止自动安排，而不是静默猜测。
+    """
+    payload = dict(row)
+    minutes, state = stored_response_minutes(payload.get("response_minutes"))
+    payload["response_minutes"] = minutes
+    payload["response_duration_state"] = state
+    return payload
 
 
 class CollectionLogisticsService:
@@ -216,7 +238,22 @@ class CollectionLogisticsService:
                         self._now(),
                     ),
                 )
-                self._audit("route", route.corridor_id, "route.created", actor_id, raw)
+                self._audit(
+                    "route",
+                    route.corridor_id,
+                    "route.created",
+                    actor_id,
+                    {
+                        "corridor_id": route.corridor_id,
+                        "origin_center_id": route.origin_center_id,
+                        "destination_center_id": route.destination_center_id,
+                        "preservation_resource_kind": route.preservation_resource_kind,
+                        "hourly_capacity": decimal_text(route.hourly_capacity),
+                        "delay_basis_points": route.delay_basis_points,
+                        "response_minutes": route.response_minutes,
+                        "response_duration_state": DURATION_STATE_MINUTES,
+                    },
+                )
         except sqlite3.IntegrityError as exc:
             raise Conflict("转运路线编号冲突或设施不存在") from exc
         return self.route(route.corridor_id)
@@ -225,7 +262,7 @@ class CollectionLogisticsService:
         row = self.connection.execute("SELECT * FROM road_corridors WHERE corridor_id=?", (corridor_id,)).fetchone()
         if row is None:
             raise NotFound("转运路线不存在")
-        return dict(row)
+        return _route_view(row)
 
     def announce_restriction(
         self,
@@ -422,6 +459,9 @@ class CollectionLogisticsService:
             raise NotFound("调度申请不存在")
         if dispatch_request["state"] != "allocated" or dispatch_request["revision"] != expected_revision:
             raise InvalidState("调度申请不是当前可资源到场版本")
+        response_minutes, _ = stored_response_minutes(dispatch_request["response_minutes"])
+        if response_minutes is None:
+            raise InvalidState("通道响应时长单位无法明确识别，已阻止自动安排，请先修正通道档案")
         lot = self.connection.execute("SELECT * FROM preservation_resource_lots WHERE preservation_resource_lot_id=?", (preservation_resource_lot_id,)).fetchone()
         if lot is None:
             raise NotFound("研究资源批次不存在")
@@ -433,6 +473,8 @@ class CollectionLogisticsService:
             raise Conflict("研究资源库存不足以完成分配")
         expected_delivery = delivered_after_loss(allocated, int(dispatch_request["delay_basis_points"]))
         departed_at = self._now()
+        arrival = expected_arrival(parse_utc(departed_at, "departed_at"), response_minutes)
+        expected_arrival_text = utc_text(arrival)
         with transaction(self.connection, immediate=True):
             self.connection.execute(
                 "UPDATE preservation_resource_lots SET available_units=?,revision=revision+1 WHERE preservation_resource_lot_id=? AND revision=?",
@@ -456,13 +498,24 @@ class CollectionLogisticsService:
                     departed_at,
                 ),
             )
-            self._audit("deployment", deployment_id, "deployment.dispatched", actor_id, {"dispatch_id": dispatch_id})
+            self._audit(
+                "deployment",
+                deployment_id,
+                "deployment.dispatched",
+                actor_id,
+                {
+                    "dispatch_id": dispatch_id,
+                    "response_minutes": response_minutes,
+                    "expected_arrival": expected_arrival_text,
+                },
+            )
         return {
             "deployment_id": deployment_id,
             "state": "in_transit",
             "deployed_units": decimal_text(allocated),
             "expected_arrived_units": decimal_text(expected_delivery),
-            "expected_arrival": utc_text(parse_utc(departed_at) + timedelta(hours=int(dispatch_request["response_minutes"]))),
+            "response_minutes": response_minutes,
+            "expected_arrival": expected_arrival_text,
         }
 
     def create_scenario(self, actor_id: str, raw: Mapping[str, Any]) -> dict[str, Any]:

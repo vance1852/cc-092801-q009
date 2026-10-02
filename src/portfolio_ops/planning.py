@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable, Mapping, Sequence
+
+from .models import MAX_RESPONSE_MINUTES
 
 
 ZERO = Decimal("0")
@@ -148,6 +151,15 @@ def delivered_after_loss(loaded: Decimal, delay_basis_points: int) -> Decimal:
         raise ValueError("损耗基点超出范围")
     retained = Decimal(1) - Decimal(delay_basis_points) / BASIS_POINTS
     return quantize_volume(loaded * retained)
+
+
+def expected_arrival(started_at: datetime, response_minutes: int) -> datetime:
+    """从带时区的开始时间按分钟计算预计完成时刻，跨日边界由 timedelta 处理。"""
+    if started_at.tzinfo is None:
+        raise ValueError("开始时间必须带时区")
+    if not 0 < response_minutes <= MAX_RESPONSE_MINUTES:
+        raise ValueError("响应时长超出有效分钟范围")
+    return started_at + timedelta(minutes=response_minutes)
 
 
 def weighted_inventory_cost(lots: Iterable[Mapping[str, object]]) -> dict[str, str]:
